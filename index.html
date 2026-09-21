@@ -212,6 +212,43 @@
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line-strong);
     border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
   @keyframes sp{to{transform:rotate(360deg)}}
+  /* ---- posizioni ---- */
+  .pos-summary{display:flex;align-items:baseline;gap:10px;padding:9px 14px;background:var(--surface-2);
+    border-bottom:1px solid var(--line)}
+  .ps-k{font-size:12.5px;color:var(--ink-soft)}
+  .ps-v{margin-left:auto;font-weight:600}
+  .ps-p{font-weight:500;font-size:12.5px;opacity:.8}
+  .held{display:inline-block;background:var(--accent-soft);color:var(--accent);border-radius:4px;
+    padding:0 5px;font-size:11px;font-weight:600;margin-right:5px;vertical-align:1px}
+
+  .pos{margin-top:26px;border-top:1px solid var(--line);padding-top:16px}
+  .pos h3{font-size:14px;font-weight:600;margin:0 0 10px}
+  .pos-hint{color:var(--ink-faint);font-size:12.5px;margin:8px 0 0}
+  .pos-list{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+  .pos-list>li{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:var(--surface-2)}
+  .pos-main{display:flex;align-items:flex-start;gap:12px}
+  .pos-qty{font-weight:600}
+  .pos-sub{color:var(--ink-faint);font-size:12.5px}
+  .pos-pl{margin-left:auto;text-align:right}
+  .pos-pl-v{font-size:19px;font-weight:600}
+  .pos-pl-v .cur{font-size:12px;color:var(--ink-faint);font-weight:400}
+  .pos-pl-p{font-size:13px;font-weight:600}
+  .pos-meta{display:flex;flex-wrap:wrap;gap:6px 16px;margin-top:9px;padding-top:9px;
+    border-top:1px solid var(--line);font-size:12.5px;color:var(--ink-soft)}
+  .pos-meta b{color:var(--ink)}
+  .pos-close{display:flex;gap:7px;flex-wrap:wrap;margin-top:10px;align-items:center}
+  .pos-close input{padding:6px 9px;border:1px solid var(--line-strong);border-radius:7px;
+    background:var(--surface);color:var(--ink);width:135px}
+  .pos-form{display:flex;gap:7px;flex-wrap:wrap;align-items:center;margin-top:14px}
+  .pos-form-k{font-size:13px;color:var(--ink-soft);font-weight:500}
+  .pos-form input{padding:7px 10px;border:1px solid var(--line-strong);border-radius:8px;
+    background:var(--surface-2);color:var(--ink);width:150px}
+  .pos-closed{margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}
+  .pos-closed h4{font-size:13px;font-weight:600;margin:0 0 8px;color:var(--ink-soft)}
+  .pos-closed-list{list-style:none;margin:0;padding:0;display:grid;gap:6px}
+  .pos-closed-list li{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:13.5px;
+    padding:7px 10px;border:1px solid var(--line);border-radius:8px}
+
   .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
   .chip{
     border:1px solid var(--line-strong);background:var(--surface);color:var(--ink-soft);
@@ -289,6 +326,7 @@ const LS = {
   proxy:'listino.proxy',
   custom:'listino.proxyCustom',
   refresh:'listino.refresh',
+  pos:'listino.positions',
   sel:'listino.selected'
 };
 
@@ -415,6 +453,46 @@ async function search(q, cfg, onProxyOk){
       exchange:x.exchDisp || x.exchange || '',
       type:x.quoteType || ''
     }));
+}
+
+/* ============================== posizioni ============================== */
+
+function pnum(v){
+  let s = String(v==null?'':v).trim().replace(/\s/g,'');
+  if(!s) return null;
+  const hasComma = s.indexOf(',')>=0, hasDot = s.indexOf('.')>=0;
+  if(hasComma && hasDot) s = s.replace(/\./g,'').replace(',','.');  /* 1.234,5 */
+  else if(hasComma) s = s.replace(',','.');                          /* 12,75 */
+  const n = parseFloat(s);
+  return isFinite(n) ? n : null;
+}
+
+/* calcolo di una posizione: lordo, percentuale, R corrente, distanza dallo stop */
+function posMath(p, price){
+  const px = (p.status==='chiusa') ? p.exit : price;
+  const out = {px:px, cost:p.qty*p.entry, value:null, pl:null, plPct:null, r:null, risk:null, distStop:null};
+  if(p.stop!=null && isFinite(p.stop)) out.risk = (p.entry-p.stop)*p.qty;
+  if(px==null || !isFinite(px)) return out;
+  out.value = p.qty*px;
+  out.pl = (px-p.entry)*p.qty;
+  out.plPct = p.entry ? (px-p.entry)/p.entry*100 : null;
+  if(out.risk && out.risk!==0) out.r = out.pl/Math.abs(out.risk);
+  if(p.stop!=null && isFinite(p.stop) && px) out.distStop = (px-p.stop)/px*100;
+  return out;
+}
+
+/* stima al netto: 26% sulle plusvalenze. Le minusvalenze vanno nello zainetto fiscale. */
+function netEstimate(pl){ return pl>0 ? pl*0.74 : pl; }
+
+function posCsv(list){
+  const head = ['Simbolo','Quantità','Prezzo carico','Data ingresso','Prezzo uscita','Data uscita','P&L lordo','R'];
+  const rows = list.map(p=>{
+    const m = posMath(p, null);
+    const it = v => v==null ? '' : String(v).replace('.',',');
+    return [p.symbol, it(p.qty), it(p.entry), p.date||'', it(p.exit), p.exitDate||'',
+            it(m.pl!=null?Math.round(m.pl*100)/100:null), it(m.r!=null?Math.round(m.r*100)/100:null)].join(';');
+  });
+  return head.join(';')+'\n'+rows.join('\n');
 }
 
 /* ============================== indicatori ============================== */
@@ -820,6 +898,7 @@ function Band({title, low, high, value}){
 function App(){
   const [watch,setWatch]       = useState(()=>load(LS.watch, DEFAULT_WATCH));
   const [alerts,setAlerts]     = useState(()=>load(LS.alerts, []));
+  const [positions,setPos]     = useState(()=>load(LS.pos, []));
   const [selected,setSelected] = useState(()=>load(LS.sel, (load(LS.watch,DEFAULT_WATCH)[0]||{}).symbol || null));
   const [quotes,setQuotes]     = useState({});
   const [rangeId,setRangeId]   = useState('1m');
@@ -856,6 +935,7 @@ function App(){
 
   useEffect(()=>save(LS.watch,watch),[watch]);
   useEffect(()=>save(LS.alerts,alerts),[alerts]);
+  useEffect(()=>save(LS.pos,positions),[positions]);
   useEffect(()=>save(LS.proxy,proxy),[proxy]);
   useEffect(()=>save(LS.custom,custom),[custom]);
   useEffect(()=>save(LS.refresh,refreshMin),[refreshMin]);
@@ -1054,8 +1134,30 @@ function App(){
     }
   }
 
+  function openPosition(p){
+    const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
+    setPos(list=>list.concat([Object.assign({},p,{id:id, status:'aperta', exit:null, exitDate:null})]));
+    if(p.stop!=null && isFinite(p.stop)) addAlert(p.symbol,'sotto',p.stop);
+  }
+  function closePosition(id, exit, exitDate){
+    if(exit==null) return;
+    setPos(list=>list.map(p=>p.id===id?Object.assign({},p,{status:'chiusa',exit:exit,exitDate:exitDate}):p));
+  }
+  function deletePosition(id){ setPos(list=>list.filter(p=>p.id!==id)); }
+
+  function exportPositions(){
+    const closed = positions.filter(p=>p.status==='chiusa');
+    if(!closed.length){ alert('Nessuna posizione chiusa da esportare.'); return; }
+    const blob = new Blob(['\ufeff'+posCsv(closed)],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(blob);
+    a.download='posizioni-chiuse-'+new Date().toISOString().slice(0,10)+'.csv';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  }
+
   function exportData(){
-    const blob = new Blob([JSON.stringify({watch:watch,alerts:alerts},null,2)],{type:'application/json'});
+    const blob = new Blob([JSON.stringify({watch:watch,alerts:alerts,positions:positions},null,2)],{type:'application/json'});
     const a=document.createElement('a');
     a.href=URL.createObjectURL(blob);
     a.download='listino-'+new Date().toISOString().slice(0,10)+'.json';
@@ -1069,6 +1171,7 @@ function App(){
         const d=JSON.parse(r.result);
         if(Array.isArray(d.watch)) setWatch(d.watch);
         if(Array.isArray(d.alerts)) setAlerts(d.alerts);
+        if(Array.isArray(d.positions)) setPos(d.positions);
         setSettings(false);
         setTimeout(()=>refreshAll(d.watch||watch),50);
       }catch(e){ alert('File non leggibile.'); }
@@ -1077,6 +1180,15 @@ function App(){
   }
 
   const q = selected ? quotes[selected] : null;
+  const openPositions = positions.filter(p=>p.status!=='chiusa');
+  const openTot = openPositions.reduce((acc,p)=>{
+    const px = quotes[p.symbol] ? quotes[p.symbol].price : null;
+    const m = posMath(p, px);
+    acc.cost += m.cost;
+    if(m.pl!=null){ acc.pl += m.pl; acc.valued += m.cost; }
+    return acc;
+  },{cost:0,pl:0,valued:0});
+  const openPct = openTot.valued ? openTot.pl/openTot.valued*100 : null;
   const rangeCfg = RANGES.find(x=>x.id===rangeId);
   const symAlerts = alerts.filter(a=>a.symbol===selected);
 
@@ -1154,6 +1266,16 @@ function App(){
             )}
           </div>
 
+          {openPositions.length>0 && (
+            <div className="pos-summary">
+              <span className="ps-k">{openPositions.length===1?'1 posizione aperta':openPositions.length+' posizioni aperte'}</span>
+              <span className={'ps-v num '+signCls(openTot.pl)}>
+                {(openTot.pl>0?'+':'')+nf(openTot.pl,2)}
+                {openPct!=null && <span className="ps-p"> {pctStr(openPct)}</span>}
+              </span>
+            </div>
+          )}
+
           {watch.length===0 ? (
             <div className="empty">
               <strong>Watchlist vuota</strong>
@@ -1164,13 +1286,17 @@ function App(){
               {watch.map(w=>{
                 const qq = quotes[w.symbol];
                 const has = alerts.some(a=>a.symbol===w.symbol && a.active);
+                const held = positions.some(p=>p.symbol===w.symbol && p.status!=='chiusa');
                 return (
                   <li key={w.symbol} data-sel={selected===w.symbol?'1':'0'}>
                     <button className="row" onClick={()=>setSelected(w.symbol)}>
                       {has && <span className="bell" title="Avviso attivo">●</span>}
                       <span className="sym">{w.symbol}</span>
                       <span className="px num">{qq?nf(qq.price):'—'}</span>
-                      <span className="nm">{(qq&&qq.name)||w.name||''}</span>
+                      <span className="nm">
+                        {held && <span className="held">in posizione</span>}
+                        {(qq&&qq.name)||w.name||''}
+                      </span>
                       <span className={'ch num '+signCls(qq&&qq.pct)}>{qq?pctStr(qq.pct):''}</span>
                     </button>
                   </li>
@@ -1252,6 +1378,10 @@ function App(){
                 <div className="stat"><div className="k">Max 52 sett.</div><div className="v num">{q?nf(q.w52High):'—'}</div></div>
               </div>
 
+              <PositionsSection symbol={selected} price={q&&q.price} currency={q&&q.currency}
+                                positions={positions.filter(p=>p.symbol===selected)}
+                                onOpen={openPosition} onClose={closePosition} onDelete={deletePosition}/>
+
               <MarketCard market={market}/>
               <SignalCard analysis={analysis} market={market} loading={anaLoad}/>
               <NewsList items={news} loading={newsLoad} type={instType}/>
@@ -1330,6 +1460,14 @@ function App(){
                   </label>
                 </div>
                 <div className="hint">I dati restano nel browser di questo dispositivo.</div>
+              </div>
+
+              <div className="field">
+                <label>Posizioni chiuse</label>
+                <button className="btn" onClick={exportPositions}>Esporta in CSV per Registro</button>
+                <div className="hint">
+                  Separatore punto e virgola e decimali con la virgola, così Excel in italiano lo apre già in colonne.
+                </div>
               </div>
             </div>
             <div className="modal-foot">
@@ -1437,6 +1575,132 @@ function NewsList({items, loading, type}){
             </li>
           ))}
         </ul>
+      )}
+    </div>
+  );
+}
+
+function PositionsSection({symbol, price, currency, positions, onOpen, onClose, onDelete}){
+  const [qty,setQty]     = useState('');
+  const [entry,setEntry] = useState('');
+  const [date,setDate]   = useState(()=>new Date().toISOString().slice(0,10));
+  const [stop,setStop]   = useState('');
+  const [closing,setClosing] = useState(null);
+  const [exitPx,setExitPx]   = useState('');
+  const [exitDate,setExitDate] = useState(()=>new Date().toISOString().slice(0,10));
+
+  useEffect(()=>{ setQty(''); setEntry(''); setStop(''); setClosing(null); setExitPx(''); },[symbol]);
+
+  const open   = positions.filter(p=>p.status!=='chiusa');
+  const closed = positions.filter(p=>p.status==='chiusa');
+
+  function submit(){
+    const q=pnum(qty), e=pnum(entry), s=pnum(stop);
+    if(!q || q<=0 || !e || e<=0) return;
+    onOpen({symbol:symbol, qty:q, entry:e, stop:s, date:date});
+    setQty(''); setEntry(''); setStop('');
+  }
+
+  return (
+    <div className="pos">
+      <h3>Posizione su {symbol}</h3>
+
+      {open.length===0 ? (
+        <p className="pos-hint">Nessuna posizione aperta. Registra l'ingresso per vedere il P&amp;L aggiornarsi coi prezzi.</p>
+      ) : (
+        <ul className="pos-list">
+          {open.map(p=>{
+            const m = posMath(p, price);
+            return (
+              <li key={p.id}>
+                <div className="pos-main">
+                  <div>
+                    <div className="pos-qty num">{nf(p.qty,p.qty%1===0?0:4)} × {nf(p.entry)}</div>
+                    <div className="pos-sub">
+                      dal {p.date||'—'}
+                      {p.stop!=null && isFinite(p.stop) ? ' · stop '+nf(p.stop) : ' · nessuno stop'}
+                    </div>
+                  </div>
+                  <div className="pos-pl">
+                    <div className={'pos-pl-v num '+signCls(m.pl)}>
+                      {m.pl!=null ? (m.pl>0?'+':'')+nf(m.pl,2) : '—'} <span className="cur">{currency||''}</span>
+                    </div>
+                    <div className={'pos-pl-p num '+signCls(m.plPct)}>{m.plPct!=null?pctStr(m.plPct):''}</div>
+                  </div>
+                </div>
+
+                <div className="pos-meta">
+                  <span>Controvalore <b className="num">{m.value!=null?nf(m.value,2):'—'}</b></span>
+                  <span>Investito <b className="num">{nf(m.cost,2)}</b></span>
+                  {m.r!=null && <span>R corrente <b className="num">{(m.r>0?'+':'')+nf(m.r,2)}</b></span>}
+                  {m.risk!=null && <span>Rischio iniziale <b className="num">{nf(Math.abs(m.risk),2)}</b></span>}
+                  {m.distStop!=null && (
+                    <span className={m.distStop<0?'down':''}>
+                      {m.distStop>=0 ? 'Stop lontano ' : 'Stop già superato di '}
+                      <b className="num">{nf(Math.abs(m.distStop),1)}%</b>
+                    </span>
+                  )}
+                </div>
+
+                {closing===p.id ? (
+                  <div className="pos-close">
+                    <input className="num" placeholder={price!=null?nf(price):'prezzo uscita'}
+                           value={exitPx} onChange={e=>setExitPx(e.target.value)}/>
+                    <input type="date" value={exitDate} onChange={e=>setExitDate(e.target.value)}/>
+                    <button className="btn primary tiny" disabled={!pnum(exitPx)}
+                            onClick={()=>{ onClose(p.id, pnum(exitPx), exitDate); setClosing(null); setExitPx(''); }}>
+                      Registra uscita
+                    </button>
+                    <button className="btn tiny" onClick={()=>setClosing(null)}>Annulla</button>
+                  </div>
+                ) : (
+                  <div className="pos-close">
+                    <button className="btn tiny" onClick={()=>{ setClosing(p.id); setExitPx(price!=null?String(nf(price)):''); }}>
+                      Chiudi posizione
+                    </button>
+                    <button className="btn tiny" onClick={()=>onDelete(p.id)}>Elimina</button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <div className="pos-form">
+        <span className="pos-form-k">Nuovo ingresso</span>
+        <input placeholder="quantità" value={qty} onChange={e=>setQty(e.target.value)}/>
+        <input placeholder={price!=null?'carico '+nf(price):'prezzo di carico'}
+               value={entry} onChange={e=>setEntry(e.target.value)}/>
+        <input placeholder="stop (facoltativo)" value={stop} onChange={e=>setStop(e.target.value)}/>
+        <input type="date" value={date} onChange={e=>setDate(e.target.value)}/>
+        <button className="btn primary" disabled={!pnum(qty)||!pnum(entry)} onClick={submit}>Registra ingresso</button>
+      </div>
+      <p className="pos-hint">Con lo stop compilato viene creato anche l'avviso di prezzo corrispondente.</p>
+
+      {closed.length>0 && (
+        <div className="pos-closed">
+          <h4>Chiuse su {symbol}</h4>
+          <ul className="pos-closed-list">
+            {closed.map(p=>{
+              const m = posMath(p, null);
+              return (
+                <li key={p.id}>
+                  <span className="num">{nf(p.qty,p.qty%1===0?0:4)} × {nf(p.entry)} → {nf(p.exit)}</span>
+                  <span className="pos-sub">{p.date} – {p.exitDate}</span>
+                  <span className={'num '+signCls(m.pl)} style={{marginLeft:'auto',fontWeight:600}}>
+                    {(m.pl>0?'+':'')+nf(m.pl,2)}
+                  </span>
+                  {m.r!=null && <span className="pos-sub num">R {(m.r>0?'+':'')+nf(m.r,2)}</span>}
+                  <span className="pos-sub num" title="Stima: 26% sulla plusvalenza. Le minusvalenze vanno nello zainetto fiscale.">
+                    netto ~{nf(netEstimate(m.pl),2)}
+                  </span>
+                  <button className="btn tiny" onClick={()=>onDelete(p.id)}>Elimina</button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </div>
   );
