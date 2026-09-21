@@ -212,6 +212,13 @@
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line-strong);
     border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
   @keyframes sp{to{transform:rotate(360deg)}}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+  .chip{
+    border:1px solid var(--line-strong);background:var(--surface);color:var(--ink-soft);
+    border-radius:99px;padding:4px 10px;font-size:12.5px;font-weight:500
+  }
+  .chip:hover{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
+
   /* ---- clima di mercato ---- */
   .market{margin-top:26px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .market-head{display:flex;align-items:baseline;gap:10px;padding:10px 13px;background:var(--surface-2);
@@ -478,13 +485,29 @@ const BENCH = [
   {suf:'.HK', sym:'^HSI',       name:'Hang Seng'},
   {suf:'.T',  sym:'^N225',      name:'Nikkei 225'}
 ];
-function benchFor(sym){
+function benchFor(sym, type){
   if(!sym) return null;
   const s = sym.toUpperCase();
+  const t = (type||'').toUpperCase();
   if(s.charAt(0)==='^' || /=X$/.test(s) || /-(USD|EUR)$/.test(s)) return null;
+  if(t==='INDEX' || t==='CURRENCY' || t==='CRYPTOCURRENCY') return null;
+  /* un ETF non è italiano solo perché quotato a Milano: niente confronto col listino locale */
+  if(t==='ETF' || t==='MUTUALFUND') return {suf:'', sym:'^GSPC', name:'S&P 500'};
   for(const b of BENCH){ if(s.endsWith(b.suf)) return (s===b.sym.toUpperCase()?null:b); }
   return {suf:'', sym:'^GSPC', name:'S&P 500'};
 }
+
+/* scorciatoie: strumenti diffusi su Borsa Italiana, aggiungibili con un clic */
+const SUGGESTED = [
+  {symbol:'SWDA.MI',  name:'iShares Core MSCI World',          label:'MSCI World'},
+  {symbol:'VWCE.MI',  name:'Vanguard FTSE All-World',          label:'All-World'},
+  {symbol:'CSSPX.MI', name:'iShares Core S&P 500',             label:'S&P 500 ETF'},
+  {symbol:'EIMI.MI',  name:'iShares Core MSCI EM IMI',         label:'Emergenti'},
+  {symbol:'AGGH.MI',  name:'iShares Global Aggregate Bond',    label:'Obbligazioni'},
+  {symbol:'XEON.MI',  name:'Xtrackers Overnight Rate',         label:'Monetario €'},
+  {symbol:'PHAU.MI',  name:'WisdomTree Physical Gold',         label:'Oro'},
+  {symbol:'^VIX',     name:'VIX',                              label:'VIX'}
+];
 
 /* clima di mercato: indice di riferimento + VIX */
 function readMarket(idxPts, vixPts, idxName){
@@ -824,6 +847,7 @@ function App(){
   const [anaLoad,setAnaLoad]   = useState(false);
   const [news,setNews]         = useState([]);
   const [newsLoad,setNewsLoad] = useState(false);
+  const [instType,setInstType] = useState('');
   const cache = useRef({});
 
   const cfg = useMemo(()=>({proxy:proxy, custom:custom}),[proxy,custom]);
@@ -936,34 +960,37 @@ function App(){
   useEffect(()=>{
     if(!selected){ setAnalysis(null); setNews([]); return; }
     let alive = true;
-    const bench = benchFor(selected);
 
     const year = async (sym)=>{
       const key = sym+'|'+Math.floor(Date.now()/(15*60000));
       if(cache.current[key]) return cache.current[key];
       const d = await getChart(sym,'1y','1d',cfgRef.current,onProxyOk);
-      cache.current[key] = d.points;
-      return d.points;
+      cache.current[key] = d;
+      return d;
     };
 
-    setAnaLoad(true);
+    setAnaLoad(true); setNewsLoad(true); setNews([]);
     (async ()=>{
-      let own=null, bp=null, idx=null, vix=null;
-      try{ own = await year(selected); }catch(e){}
+      let own=null, bp=null, idx=null, vix=null, type='';
+      try{ own = await year(selected); type = (own.meta && own.meta.instrumentType) || ''; }catch(e){}
+      if(!alive) return;
+      setInstType(type);
+      const bench = benchFor(selected, type);
       if(bench){ try{ bp = await year(bench.sym); }catch(e){} }
-      try{ idx = bp || await year(bench ? bench.sym : '^GSPC'); }catch(e){}
+      try{ idx = bp || await year('^GSPC'); }catch(e){}
       try{ vix = await year('^VIX'); }catch(e){}
       if(!alive) return;
-      setMarket(readMarket(idx, vix, bench ? bench.name : 'S&P 500'));
-      setAnalysis(own ? analyze(own, bp?bp.map(p=>p.c):null, bench?bench.name:null) : null);
+      setMarket(readMarket(idx?idx.points:null, vix?vix.points:null, bench?bench.name:'S&P 500'));
+      setAnalysis(own ? analyze(own.points, bp?bp.points.map(p=>p.c):null, bench?bench.name:null) : null);
       setAnaLoad(false);
-    })();
 
-    setNewsLoad(true);
-    const nm = (quotes[selected] && quotes[selected].name) || selected;
-    getNews(selected, nm, cfgRef.current, onProxyOk)
-      .then(l=>{ if(alive){ setNews(l); setNewsLoad(false); } })
-      .catch(()=>{ if(alive){ setNews([]); setNewsLoad(false); } });
+      /* le notizie hanno senso solo su una società: su ETF e indici sarebbero rumore */
+      if(String(type).toUpperCase()!=='EQUITY'){ if(alive) setNewsLoad(false); return; }
+      const nm = (own && own.meta && (own.meta.longName||own.meta.shortName)) || selected;
+      try{ const l = await getNews(selected, nm, cfgRef.current, onProxyOk); if(alive) setNews(l); }
+      catch(e){ if(alive) setNews([]); }
+      if(alive) setNewsLoad(false);
+    })();
 
     return ()=>{ alive=false; };
     // eslint-disable-next-line
@@ -1103,6 +1130,15 @@ function App(){
           <div className="search-box">
             <input className="search-input" placeholder="Cerca un titolo, indice o cambio"
                    value={term} onChange={e=>setTerm(e.target.value)} />
+            {term.trim().length<2 && (
+              <div className="chips">
+                {SUGGESTED.filter(s=>!watch.some(w=>w.symbol===s.symbol)).map(s=>(
+                  <button key={s.symbol} className="chip" onClick={()=>addSymbol(s)} title={s.symbol}>
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            )}
             {term.trim().length>=2 && (
               <ul className="results">
                 {searching && <li style={{color:'var(--ink-faint)'}}>Ricerca in corso…</li>}
@@ -1218,7 +1254,7 @@ function App(){
 
               <MarketCard market={market}/>
               <SignalCard analysis={analysis} market={market} loading={anaLoad}/>
-              <NewsList items={news} loading={newsLoad}/>
+              <NewsList items={news} loading={newsLoad} type={instType}/>
 
               <AlertSection symbol={selected} price={q&&q.price} alerts={symAlerts}
                             onAdd={addAlert}
@@ -1377,13 +1413,22 @@ function SignalCard({analysis, market, loading}){
   );
 }
 
-function NewsList({items, loading}){
+function NewsList({items, loading, type}){
+  const t = String(type||'').toUpperCase();
+  const isCompany = t==='EQUITY' || t==='';
   return (
     <div className="news">
       <h3>Notizie sulla società</h3>
-      {loading && <p className="news-empty"><span className="spin"/> Cerco le ultime notizie…</p>}
-      {!loading && items.length===0 && <p className="news-empty">Nessuna notizia trovata per questo simbolo.</p>}
-      {!loading && items.length>0 && (
+      {!isCompany && (
+        <p className="news-empty">
+          {t==='ETF'||t==='MUTUALFUND'
+            ? 'È un fondo: non ha notizie societarie proprie. Conta il mercato che replica, che trovi nel clima di mercato qui sopra.'
+            : 'Strumento senza una società dietro: qui non c\'è nulla da leggere.'}
+        </p>
+      )}
+      {isCompany && loading && <p className="news-empty"><span className="spin"/> Cerco le ultime notizie…</p>}
+      {isCompany && !loading && items.length===0 && <p className="news-empty">Nessuna notizia trovata per questo simbolo.</p>}
+      {isCompany && !loading && items.length>0 && (
         <ul className="news-list">
           {items.map((n,i)=>(
             <li key={i}>
