@@ -212,6 +212,34 @@
   .spin{display:inline-block;width:12px;height:12px;border:2px solid var(--line-strong);
     border-top-color:var(--accent);border-radius:50%;animation:sp .7s linear infinite;vertical-align:-1px}
   @keyframes sp{to{transform:rotate(360deg)}}
+  /* ---- classifiche ---- */
+  .tabs{display:flex;background:var(--surface);border:1px solid var(--line-strong);border-radius:8px;overflow:hidden}
+  .tabs button{border:0;background:transparent;color:var(--ink-soft);padding:7px 13px;font-weight:500}
+  .tabs button:hover{background:var(--surface-2);color:var(--ink)}
+  .tabs button[aria-pressed="true"]{background:var(--ink);color:#fff}
+  .rank-controls{display:flex;gap:8px;flex-wrap:wrap;align-items:center;padding:13px 14px;
+    border-bottom:1px solid var(--line)}
+  .rank-controls select{padding:7px 10px;border:1px solid var(--line-strong);border-radius:8px;
+    background:var(--surface-2);color:var(--ink)}
+  .rank-note{color:var(--ink-faint);font-size:12.5px;flex:1;min-width:180px}
+  .rank-body{padding:14px}
+  .rank-grid{display:grid;gap:22px}
+  @media(min-width:900px){.rank-grid{grid-template-columns:1fr 1fr;gap:26px}}
+  .rank-block h3{font-size:13.5px;font-weight:600;margin:0 0 9px;color:var(--ink-soft)}
+  .rank-table{width:100%;border-collapse:collapse;font-size:13.5px}
+  .rank-table th{text-align:right;font-weight:500;color:var(--ink-faint);font-size:12px;
+    padding:0 0 6px;border-bottom:1px solid var(--line-strong)}
+  .rank-table th:first-child{text-align:left}
+  .rank-table th.on{color:var(--ink);font-weight:600}
+  .rank-table td{padding:7px 0;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+  .rank-table tr{cursor:pointer}
+  .rank-table tbody tr:hover td{background:var(--accent-soft)}
+  .rank-table td.on{font-weight:700}
+  .rt-name{text-align:left !important;display:flex;flex-direction:column;padding-right:10px !important}
+  .rt-name b{font-weight:600}
+  .rt-name span{color:var(--ink-faint);font-size:11.5px;max-width:150px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+
   /* ---- posizioni ---- */
   .pos-summary{display:flex;align-items:baseline;gap:10px;padding:9px 14px;background:var(--surface-2);
     border-bottom:1px solid var(--line)}
@@ -454,6 +482,33 @@ async function search(q, cfg, onProxyOk){
       type:x.quoteType || ''
     }));
 }
+
+/* ============================== classifiche ============================== */
+
+const FTSEMIB = ['A2A.MI','AMP.MI','AZM.MI','BAMI.MI','BGN.MI','BMED.MI','BMPS.MI','BPE.MI','BZU.MI','CPR.MI',
+  'DIA.MI','ENEL.MI','ENI.MI','FBK.MI','G.MI','HER.MI','IG.MI','INW.MI','IP.MI','ISP.MI','IVG.MI','LDO.MI',
+  'MB.MI','MONC.MI','NEXI.MI','PIRC.MI','PRY.MI','PST.MI','RACE.MI','REC.MI','SPM.MI','SRG.MI','STLAM.MI',
+  'STMMI.MI','TEN.MI','TIT.MI','TRN.MI','UCG.MI','UNI.MI'];
+
+const SETTORI = ['XLK','XLF','XLE','XLV','XLI','XLY','XLP','XLU','XLB','XLRE','XLC'];
+
+const GLOBALI = ['^GSPC','^NDX','^DJI','^GDAXI','^FCHI','FTSEMIB.MI','^FTSE','^N225','^HSI','^STOXX50E',
+  'GC=F','CL=F','EURUSD=X','BTC-USD','^TNX'];
+
+const UNIVERSES = [
+  {id:'watch',   label:'La mia watchlist', list:null, note:'Calcolata subito sui dati già scaricati.'},
+  {id:'ftsemib', label:'FTSE MIB',         list:FTSEMIB, note:'39 titoli: il caricamento richiede circa un minuto.'},
+  {id:'settori', label:'Settori USA',      list:SETTORI, note:'Gli undici settori dell'+"'"+'S&P 500 via ETF SPDR.'},
+  {id:'globali', label:'Indici e materie prime', list:GLOBALI, note:'Listini mondiali, oro, petrolio, cambio e tassi.'}
+];
+
+const PERIODS = [
+  {id:'1s', label:'1 settimana', back:5},
+  {id:'1m', label:'1 mese',      back:21},
+  {id:'3m', label:'3 mesi',      back:63},
+  {id:'6m', label:'6 mesi',      back:126},
+  {id:'1a', label:'1 anno',      back:252}
+];
 
 /* ============================== posizioni ============================== */
 
@@ -927,6 +982,14 @@ function App(){
   const [news,setNews]         = useState([]);
   const [newsLoad,setNewsLoad] = useState(false);
   const [instType,setInstType] = useState('');
+  const [view,setView]         = useState('titoli');
+  const [uniId,setUniId]       = useState('watch');
+  const [periodId,setPeriodId] = useState('1m');
+  const [rank,setRank]         = useState(null);
+  const [rankUni,setRankUni]   = useState(null);
+  const [rankLoad,setRankLoad] = useState(false);
+  const [rankProg,setRankProg] = useState({done:0,total:0});
+  const rankAbort = useRef(false);
   const cache = useRef({});
 
   const cfg = useMemo(()=>({proxy:proxy, custom:custom}),[proxy,custom]);
@@ -1036,18 +1099,19 @@ function App(){
     return ()=>{ alive=false; };
   },[selected,rangeId,proxy,custom,onProxyOk]);
 
+  const yearData = useCallback(async (sym)=>{
+    const key = sym+'|'+Math.floor(Date.now()/(15*60000));
+    if(cache.current[key]) return cache.current[key];
+    const d = await getChart(sym,'1y','1d',cfgRef.current,onProxyOk);
+    cache.current[key] = d;
+    return d;
+  },[onProxyOk]);
+
   /* --- lettura indicatori + clima di mercato + notizie --- */
   useEffect(()=>{
     if(!selected){ setAnalysis(null); setNews([]); return; }
     let alive = true;
-
-    const year = async (sym)=>{
-      const key = sym+'|'+Math.floor(Date.now()/(15*60000));
-      if(cache.current[key]) return cache.current[key];
-      const d = await getChart(sym,'1y','1d',cfgRef.current,onProxyOk);
-      cache.current[key] = d;
-      return d;
-    };
+    const year = yearData;
 
     setAnaLoad(true); setNewsLoad(true); setNews([]);
     (async ()=>{
@@ -1134,6 +1198,50 @@ function App(){
     }
   }
 
+  const buildRanking = useCallback(async (id)=>{
+    const uni = UNIVERSES.find(u=>u.id===id) || UNIVERSES[0];
+    const list = uni.list || watch.map(w=>w.symbol);
+    if(!list.length){ setRank([]); setRankUni(id); return; }
+    rankAbort.current = false;
+    setRankLoad(true); setRankProg({done:0,total:list.length}); setRank(null);
+    const rows = [];
+    for(let i=0;i<list.length;i++){
+      if(rankAbort.current){ setRankLoad(false); return; }
+      const sym = list[i];
+      try{
+        const d = await yearData(sym);
+        const c = d.points.map(p=>p.c);
+        if(c.length>6){
+          const win = c.slice(-252);
+          const hi = Math.max.apply(null,win);
+          rows.push({
+            symbol:sym,
+            name:(d.meta && (d.meta.shortName||d.meta.longName)) || sym,
+            r1s:retPct(c,5), r1m:retPct(c,21), r3m:retPct(c,63), r6m:retPct(c,126), r1a:retPct(c,252),
+            fromHigh: hi ? (c[c.length-1]-hi)/hi*100 : null
+          });
+        }
+      }catch(e){}
+      setRankProg({done:i+1,total:list.length});
+      await new Promise(r=>setTimeout(r,140));
+    }
+    setRank(rows); setRankUni(id); setRankLoad(false);
+  },[watch,yearData]);
+
+  useEffect(()=>{
+    if(view==='classifiche' && uniId==='watch' && rankUni!=='watch' && !rankLoad) buildRanking('watch');
+  },[view,uniId,rankUni,rankLoad,buildRanking]);
+
+  function pickFromRank(sym, name){
+    if(!watch.some(w=>w.symbol===sym)){
+      const next = watch.concat([{symbol:sym, name:name}]);
+      setWatch(next);
+      refreshAll(next);
+    }
+    setSelected(sym);
+    setView('titoli');
+  }
+
   function openPosition(p){
     const id = Date.now()+'-'+Math.random().toString(36).slice(2,7);
     setPos(list=>list.concat([Object.assign({},p,{id:id, status:'aperta', exit:null, exitDate:null})]));
@@ -1192,6 +1300,12 @@ function App(){
   const rangeCfg = RANGES.find(x=>x.id===rangeId);
   const symAlerts = alerts.filter(a=>a.symbol===selected);
 
+  const rankKey = {'1s':'r1s','1m':'r1m','3m':'r3m','6m':'r6m','1a':'r1a'}[periodId];
+  const rankSorted = rank ? rank.filter(r=>r[rankKey]!=null).slice().sort((a,b)=>b[rankKey]-a[rankKey]) : null;
+  const rankSmall  = rankSorted && rankSorted.length<=12;
+  const rankTop    = rankSorted ? rankSorted.slice(0,10) : [];
+  const rankWorst  = rankSorted ? rankSorted.slice(-10).reverse() : [];
+
   return (
     <div className="wrap">
       <header className="top">
@@ -1200,6 +1314,10 @@ function App(){
           <p className="tagline">Quotazioni, grafici e avvisi di prezzo</p>
         </div>
         <div className="top-actions">
+          <div className="tabs">
+            <button aria-pressed={view==='titoli'} onClick={()=>setView('titoli')}>Titoli</button>
+            <button aria-pressed={view==='classifiche'} onClick={()=>setView('classifiche')}>Classifiche</button>
+          </div>
           <button className="btn" onClick={()=>refreshAll()} disabled={refreshing}>
             {refreshing ? <span className="spin"/> : 'Aggiorna'}
           </button>
@@ -1232,6 +1350,7 @@ function App(){
         </div>
       )}
 
+      {view==='titoli' && (
       <div className="layout">
         {/* ---------------- watchlist ---------------- */}
         <section className="panel">
@@ -1400,6 +1519,66 @@ function App(){
           )}
         </section>
       </div>
+      )}
+
+      {view==='classifiche' && (
+        <section className="panel">
+          <div className="panel-head">
+            <h2 className="panel-title">Classifiche per periodo</h2>
+          </div>
+
+          <div className="rank-controls">
+            <select value={uniId} onChange={e=>setUniId(e.target.value)}>
+              {UNIVERSES.map(u=><option key={u.id} value={u.id}>{u.label}</option>)}
+            </select>
+            <select value={periodId} onChange={e=>setPeriodId(e.target.value)}>
+              {PERIODS.map(p=><option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+            {rankLoad ? (
+              <button className="btn" onClick={()=>{ rankAbort.current=true; }}>
+                Interrompi ({rankProg.done}/{rankProg.total})
+              </button>
+            ) : (
+              <button className="btn primary" onClick={()=>buildRanking(uniId)}>
+                {(rankUni===uniId && rank) ? 'Ricalcola' : 'Calcola'}
+              </button>
+            )}
+            <span className="rank-note">{(UNIVERSES.find(u=>u.id===uniId)||{}).note}</span>
+          </div>
+
+          <div className="rank-body">
+            {rankLoad && (
+              <p className="news-empty"><span className="spin"/> {rankProg.done} di {rankProg.total} scaricati…</p>
+            )}
+            {!rankLoad && !rankSorted && (
+              <p className="news-empty">Scegli un paniere e premi Calcola.</p>
+            )}
+            {!rankLoad && rankSorted && rankSorted.length===0 && (
+              <p className="news-empty">Nessun dato ricevuto. Prova a cambiare proxy nelle impostazioni.</p>
+            )}
+            {!rankLoad && rankSorted && rankSorted.length>0 && (
+              rankSmall ? (
+                <RankTable title={'Dal migliore al peggiore · '+(PERIODS.find(p=>p.id===periodId)||{}).label}
+                           rows={rankSorted} periodId={periodId} onPick={pickFromRank}/>
+              ) : (
+                <div className="rank-grid">
+                  <RankTable title={'Migliori 10 · '+(PERIODS.find(p=>p.id===periodId)||{}).label}
+                             rows={rankTop} periodId={periodId} onPick={pickFromRank}/>
+                  <RankTable title={'Peggiori 10 · '+(PERIODS.find(p=>p.id===periodId)||{}).label}
+                             rows={rankWorst} periodId={periodId} onPick={pickFromRank}/>
+                </div>
+              )
+            )}
+            {!rankLoad && rankSorted && rankSorted.length>0 && (
+              <p className="caveat">
+                Classifica di ciò che è già salito o sceso. Un titolo in cima può esserlo perché sta andando bene
+                o perché è rimbalzato dopo un crollo: la colonna "dai max" e il grafico servono a distinguerli.
+                Tocca una riga per aprirla.
+              </p>
+            )}
+          </div>
+        </section>
+      )}
 
       {settings && (
         <div className="modal-bg" onClick={e=>{ if(e.target===e.currentTarget) setSettings(false); }}>
@@ -1576,6 +1755,42 @@ function NewsList({items, loading, type}){
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+function RankTable({title, rows, periodId, onPick}){
+  const key = {'1s':'r1s','1m':'r1m','3m':'r3m','6m':'r6m','1a':'r1a'}[periodId];
+  return (
+    <div className="rank-block">
+      <h3>{title}</h3>
+      <table className="rank-table">
+        <thead>
+          <tr>
+            <th>Titolo</th>
+            <th className={periodId==='1s'?'on':''}>1S</th>
+            <th className={periodId==='1m'?'on':''}>1M</th>
+            <th className={periodId==='3m'?'on':''}>3M</th>
+            <th className={periodId==='1a'?'on':''}>1A</th>
+            <th>dai max</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(r=>(
+            <tr key={r.symbol} onClick={()=>onPick(r.symbol,r.name)}>
+              <td className="rt-name">
+                <b>{r.symbol}</b>
+                <span>{r.name}</span>
+              </td>
+              <td className={'num '+signCls(r.r1s)+(key==='r1s'?' on':'')}>{r.r1s!=null?pctStr(r.r1s):'—'}</td>
+              <td className={'num '+signCls(r.r1m)+(key==='r1m'?' on':'')}>{r.r1m!=null?pctStr(r.r1m):'—'}</td>
+              <td className={'num '+signCls(r.r3m)+(key==='r3m'?' on':'')}>{r.r3m!=null?pctStr(r.r3m):'—'}</td>
+              <td className={'num '+signCls(r.r1a)+(key==='r1a'?' on':'')}>{r.r1a!=null?pctStr(r.r1a):'—'}</td>
+              <td className="num flat">{r.fromHigh!=null?nf(r.fromHigh,1)+'%':'—'}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }
