@@ -418,11 +418,17 @@ function fmtStamp(ms){
 
 /* ============================== rete ============================== */
 
+/* un proxy che ha appena fallito finisce in fondo per cinque minuti */
+const PENALTY = {};
+function penalize(id){ if(id!=='custom') PENALTY[id] = Date.now()+5*60000; }
+function penalized(id){ return (PENALTY[id]||0) > Date.now(); }
+
 function proxyOrder(preferred){
   const rest = PROXIES.filter(p=>p.id!==preferred && p.id!=='custom' && p.id!=='diretto');
   const head = PROXIES.filter(p=>p.id===preferred);
   const tail = PROXIES.filter(p=>p.id==='diretto');
-  return head.concat(rest, tail);
+  const list = head.concat(rest, tail);
+  return list.filter(p=>!penalized(p.id)).concat(list.filter(p=>penalized(p.id)));
 }
 
 /* I proxy pubblici accodano le richieste parallele fino a farle scadere:
@@ -459,16 +465,17 @@ async function fetchJSONraw(url, cfg, onProxyOk){
       const target = p.build(url, cfg.custom);
       if(!pass) tried.push(p.label);
       const ctrl = new AbortController();
-      const t = setTimeout(()=>ctrl.abort(), 20000);
+      const t = setTimeout(()=>ctrl.abort(), 9000);
       try{
         const r = await fetch(target,{signal:ctrl.signal});
         clearTimeout(t);
-        if(!r.ok) continue;
+        if(!r.ok){ penalize(p.id); continue; }
         const txt = await r.text();
         const data = JSON.parse(txt);
+        delete PENALTY[p.id];
         if(onProxyOk) onProxyOk(p.id);
         return data;
-      }catch(e){ clearTimeout(t); }
+      }catch(e){ clearTimeout(t); penalize(p.id); }
     }
   }
   throw new Error('Nessun proxy ha risposto ('+tried.join(', ')+')');
@@ -808,7 +815,7 @@ async function fetchTextRaw(url, cfg, onProxyOk){
   for(const p of proxyOrder(cfg.proxy)){
     if(p.id==='custom' && !cfg.custom) continue;
     const ctrl=new AbortController();
-    const t=setTimeout(()=>ctrl.abort(),20000);
+    const t=setTimeout(()=>ctrl.abort(),9000);
     try{
       const r=await fetch(p.build(url,cfg.custom),{signal:ctrl.signal});
       clearTimeout(t);
@@ -1076,7 +1083,7 @@ function App(){
     setQuotes(q=>Object.assign({},q,next));
     setLast(Date.now());
     setRef(false);
-    if(failures===items.length) setNetErr('Nessun dato ricevuto. Prova a cambiare proxy nelle impostazioni.');
+    if(failures===items.length) setNetErr('I proxy pubblici non rispondono: succede quando limitano il traffico. La soluzione stabile è il proxy personale su Cloudflare.');
     checkAlerts(next);
   },[watch,onProxyOk]);
 
