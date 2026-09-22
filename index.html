@@ -361,7 +361,6 @@ const LS = {
 const PROXIES = [
   {id:'allorigins', label:'AllOrigins',  build:u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u)},
   {id:'codetabs',   label:'CodeTabs',    build:u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u)},
-  {id:'corsproxy',  label:'corsproxy.io',build:u=>'https://corsproxy.io/?url='+encodeURIComponent(u)},
   {id:'diretto',    label:'Diretto (senza proxy)', build:u=>u},
   {id:'custom',     label:'Proxy personale', build:(u,base)=> base ? base+encodeURIComponent(u) : u}
 ];
@@ -426,33 +425,71 @@ function proxyOrder(preferred){
   return head.concat(rest, tail);
 }
 
-async function fetchJSON(url, cfg, onProxyOk){
+/* I proxy pubblici accodano le richieste parallele fino a farle scadere:
+   una sola alla volta, per priorità. 0 = grafico a schermo, 1 = quotazioni,
+   2 = indicatori e notizie, 3 = classifiche. */
+const QUEUE = {items:[], running:0, max:1, last:0, seq:0};
+
+function enqueue(fn, prio){
+  return new Promise((res,rej)=>{
+    QUEUE.items.push({fn:fn, prio:(prio==null?1:prio), res:res, rej:rej, seq:QUEUE.seq++});
+    setTimeout(pump,0);
+  });
+}
+function pump(){
+  if(QUEUE.running>=QUEUE.max || !QUEUE.items.length) return;
+  QUEUE.items.sort((a,b)=> (a.prio-b.prio) || (a.seq-b.seq));
+  const job = QUEUE.items.shift();
+  QUEUE.running++;
+  const gap = Math.max(0, 120-(Date.now()-QUEUE.last));
+  setTimeout(()=>{
+    QUEUE.last = Date.now();
+    Promise.resolve().then(job.fn).then(job.res, job.rej).then(()=>{ QUEUE.running--; pump(); });
+  }, gap);
+}
+
+const INFLIGHT = {};
+
+async function fetchJSONraw(url, cfg, onProxyOk){
   const tried=[];
-  for(const p of proxyOrder(cfg.proxy)){
-    if(p.id==='custom' && !cfg.custom) continue;
-    const target = p.build(url, cfg.custom);
-    tried.push(p.label);
-    const ctrl = new AbortController();
-    const t = setTimeout(()=>ctrl.abort(), 13000);
-    try{
-      const r = await fetch(target,{signal:ctrl.signal});
-      clearTimeout(t);
-      if(!r.ok) continue;
-      const txt = await r.text();
-      const data = JSON.parse(txt);
-      if(onProxyOk) onProxyOk(p.id);
-      return data;
-    }catch(e){ clearTimeout(t); }
+  for(let pass=0; pass<2; pass++){
+    if(pass) await new Promise(r=>setTimeout(r,1500));  /* i limiti dei proxy pubblici sono transitori */
+    for(const p of proxyOrder(cfg.proxy)){
+      if(p.id==='custom' && !cfg.custom) continue;
+      const target = p.build(url, cfg.custom);
+      if(!pass) tried.push(p.label);
+      const ctrl = new AbortController();
+      const t = setTimeout(()=>ctrl.abort(), 20000);
+      try{
+        const r = await fetch(target,{signal:ctrl.signal});
+        clearTimeout(t);
+        if(!r.ok) continue;
+        const txt = await r.text();
+        const data = JSON.parse(txt);
+        if(onProxyOk) onProxyOk(p.id);
+        return data;
+      }catch(e){ clearTimeout(t); }
+    }
   }
   throw new Error('Nessun proxy ha risposto ('+tried.join(', ')+')');
 }
 
+/* stessa URL richiesta due volte insieme: una sola chiamata di rete */
+function fetchJSON(url, cfg, onProxyOk, prio){
+  if(INFLIGHT[url]) return INFLIGHT[url];
+  const done = v=>{ delete INFLIGHT[url]; return v; };
+  const fail = e=>{ delete INFLIGHT[url]; throw e; };
+  const p = enqueue(()=>fetchJSONraw(url,cfg,onProxyOk), prio).then(done, fail);
+  INFLIGHT[url] = p;
+  return p;
+}
+
 const Y = 'https://query1.finance.yahoo.com';
 
-async function getChart(symbol, range, interval, cfg, onProxyOk){
+async function getChart(symbol, range, interval, cfg, onProxyOk, prio){
   const url = Y+'/v8/finance/chart/'+encodeURIComponent(symbol)+
               '?range='+range+'&interval='+interval+'&includePrePost=false';
-  const j = await fetchJSON(url, cfg, onProxyOk);
+  const j = await fetchJSON(url, cfg, onProxyOk, prio);
   const res = j && j.chart && j.chart.result && j.chart.result[0];
   if(!res) throw new Error('Simbolo non trovato');
   const meta = res.meta || {};
@@ -471,7 +508,7 @@ async function getChart(symbol, range, interval, cfg, onProxyOk){
 
 async function search(q, cfg, onProxyOk){
   const url = Y+'/v1/finance/search?q='+encodeURIComponent(q)+'&quotesCount=8&newsCount=0';
-  const j = await fetchJSON(url, cfg, onProxyOk);
+  const j = await fetchJSON(url, cfg, onProxyOk, 0);
   const list = (j && j.quotes) || [];
   return list
     .filter(x=>x.symbol)
@@ -767,11 +804,11 @@ function lightFor(analysis, market){
 
 /* ============================== notizie ============================== */
 
-async function fetchText(url, cfg, onProxyOk){
+async function fetchTextRaw(url, cfg, onProxyOk){
   for(const p of proxyOrder(cfg.proxy)){
     if(p.id==='custom' && !cfg.custom) continue;
     const ctrl=new AbortController();
-    const t=setTimeout(()=>ctrl.abort(),13000);
+    const t=setTimeout(()=>ctrl.abort(),20000);
     try{
       const r=await fetch(p.build(url,cfg.custom),{signal:ctrl.signal});
       clearTimeout(t);
@@ -781,6 +818,9 @@ async function fetchText(url, cfg, onProxyOk){
     }catch(e){ clearTimeout(t); }
   }
   throw new Error('Notizie non raggiungibili');
+}
+function fetchText(url, cfg, onProxyOk){
+  return enqueue(()=>fetchTextRaw(url,cfg,onProxyOk), 3);
 }
 
 function parseRss(xml, limit){
@@ -1015,7 +1055,7 @@ function App(){
     let failures = 0;
     for(const it of items){
       try{
-        const d = await getChart(it.symbol,'1d','1d',cfgRef.current,onProxyOk);
+        const d = await getChart(it.symbol,'1d','1d',cfgRef.current,onProxyOk,1);
         const m = d.meta;
         const price = m.regularMarketPrice!=null ? m.regularMarketPrice
                     : (d.points.length ? d.points[d.points.length-1].c : null);
@@ -1032,7 +1072,6 @@ function App(){
           ts:Date.now()
         };
       }catch(e){ failures++; }
-      await new Promise(r=>setTimeout(r,180));
     }
     setQuotes(q=>Object.assign({},q,next));
     setLast(Date.now());
@@ -1076,7 +1115,7 @@ function App(){
     const r = RANGES.find(x=>x.id===rangeId);
     let alive = true;
     setLC(true); setChartErr(null);
-    getChart(selected, r.range, r.interval, cfgRef.current, onProxyOk)
+    getChart(selected, r.range, r.interval, cfgRef.current, onProxyOk, 0)
       .then(d=>{
         if(!alive) return;
         setChart(d);
@@ -1099,10 +1138,10 @@ function App(){
     return ()=>{ alive=false; };
   },[selected,rangeId,proxy,custom,onProxyOk]);
 
-  const yearData = useCallback(async (sym)=>{
+  const yearData = useCallback(async (sym, prio)=>{
     const key = sym+'|'+Math.floor(Date.now()/(15*60000));
     if(cache.current[key]) return cache.current[key];
-    const d = await getChart(sym,'1y','1d',cfgRef.current,onProxyOk);
+    const d = await getChart(sym,'1y','1d',cfgRef.current,onProxyOk,prio==null?2:prio);
     cache.current[key] = d;
     return d;
   },[onProxyOk]);
@@ -1209,7 +1248,7 @@ function App(){
       if(rankAbort.current){ setRankLoad(false); return; }
       const sym = list[i];
       try{
-        const d = await yearData(sym);
+        const d = await yearData(sym, 3);
         const c = d.points.map(p=>p.c);
         if(c.length>6){
           const win = c.slice(-252);
@@ -1223,7 +1262,6 @@ function App(){
         }
       }catch(e){}
       setRankProg({done:i+1,total:list.length});
-      await new Promise(r=>setTimeout(r,140));
     }
     setRank(rows); setRankUni(id); setRankLoad(false);
   },[watch,yearData]);
